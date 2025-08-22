@@ -12,4 +12,4 @@ set(GLFW_BUILD_EXAMPLES OFF)
 add_subdirectory(Dependencies/glfw)
 
 add_executable(nel Source/main.cpp)
-target_link_libraries(nel glad glfw -libstdc++ -libgcc)
+target_link_libraries(nel glad glfw -static-libstdc++ -static-libgcc -static)
