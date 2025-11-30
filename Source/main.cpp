@@ -5,8 +5,17 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <cmath>
+#include <unordered_map>
 
-#define DEBUG false
+using std::sin, std::cos;
+
+#define DEBUG true
+#define PI 3.1415926535897932384626433832795028841971693993
+
+/////////////////////
+// Print Functions //
+/////////////////////
 
 // A basic function to just print some debug prints with some nice colors and styling //
 int color = 0;
@@ -26,9 +35,28 @@ void debug(std::string item, std::string message) {
 	std::cout << "\x1b[2;3m$$ DEBUG " + item + ": " + message + "\x1b[m" << std::endl;
 }
 
+//////////////
+// Uniforms //
+//////////////
+
+float uFrame = 0;
+
+float uCameraPosition[3] = {0, 0, 0};
+float uCameraRotationMatrix[9]  = {
+	0, 0, 0,
+	0, 0, 0,
+	0, 0, 0,
+};
+
+float uWidth, uHeight, uAspectRatio;
+
+////////////
+// Window //
+////////////
+
 GLFWwindow* Window;
 int width, height;
-float uWidth, uHeight;
+bool ShouldExit = false, PauseStatus = false;
 bool createWindow() {
 	print("Creating window...");
 
@@ -49,12 +77,17 @@ bool createWindow() {
 	glViewport(0, 0, width, height);
 	uWidth = (float)width;
 	uHeight = (float)height;
+	uAspectRatio = uWidth / uHeight;
 
 	// Minimize again to show off my fancy print statements .w. //
 	glfwIconifyWindow(Window);
 
 	return true;
 }
+
+//////////////
+// Geometry //
+//////////////
 
 unsigned int VertexBuffer;
 bool createVertexBuffer() {
@@ -87,6 +120,10 @@ bool createVertexBuffer() {
 
 	return true;
 }
+
+/////////////
+// Shaders //
+/////////////
 
 unsigned int ShaderProgram, FragmentShader, VertexShader;
 bool createShaders() {
@@ -171,6 +208,10 @@ bool linkProgram() {
 	return true;
 }
 
+//////////////
+// Uniforms //
+//////////////
+
 bool setUniform(const char* name, float value) {
 	
 	// Get the location of the requested uniform //
@@ -183,51 +224,131 @@ bool setUniform(const char* name, float value) {
 	return true;
 }
 
-bool setUniform(const char* name, float v1, float v2) {
-	
-	// Get the location of the requested uniform //
+enum Uniform {
+	FLOAT,
+	INT,
+	UINT,
+	VEC3,
+	MAT3
+};
+
+bool setUniform(const char* name, float* data, unsigned int type) {
 	int location = glGetUniformLocation(ShaderProgram, name);
-	if (location == -1) { error("Could not get location of uniform '" + std::string(name) + "'."); return false; }
-
-	// Set its value //
-	glUniform2f(location, v1, v2);	
-
+	if (location == -1) { error("Could not set uniform '" + std::string(name) + "' - Location could not be found."); return false; }
+	switch (type) {
+		case Uniform::FLOAT:
+			glUniform1f(location, *data);
+			break;
+		case Uniform::INT:
+			glUniform1i(location, (int)*data);
+			break;
+		case Uniform::UINT:
+			glUniform1ui(location, (unsigned int)*data);
+			break;
+		case Uniform::VEC3:
+			glUniform3f(location, data[0], data[1], data[2]);
+			break;
+		case Uniform::MAT3:
+			glUniformMatrix3fv(location, 1, GL_TRUE, data);
+			break;
+		default:
+			error("Could not set uniform '" + std::string(name) + "' - Type is not supported.");
+			return false;
+	}
+	
 	return true;
 }
 
-bool setUniform(const char* name, float v1, float v2, float v3) {
-	
-	// Get the location of the requested uniform //
-	int location = glGetUniformLocation(ShaderProgram, name);
-	if (location == -1) { error("Could not get location of uniform '" + std::string(name) + "'."); return false; }
-
-	// Set its value //
-	glUniform3f(location, v1, v2, v3);	
-
-	return true;
-}
-
-float uCameraPosition[3] = {0, 0, 0};
-float CameraRotation[2] = {0, 0};
-float uCameraDirection[3] = {0, 0, 0};
-bool setUniforms() {
+bool setInitialUniforms() {
 	print("Passing parameters to the GPU...");
 	
 	bool successState = true;
 
-	// Set a uniform to store the screen dimensions & aspect ratio //
-	successState &= setUniform("uWidth", uWidth);
-	successState &= setUniform("uHeight", uHeight);
-	successState &= setUniform("uAspectRatio", uWidth / uHeight);
-
-	// Pass the camera settings to the GPU //
-	successState &= setUniform("uCameraPosition", uCameraPosition[0], uCameraPosition[1], uCameraPosition[2]);
-	successState &= setUniform("uCameraDirection", uCameraDirection[0], uCameraDirection[1], uCameraDirection[2]);
+	// Set uniforms to store the screen dimensions & aspect ratio //
+	successState &= setUniform("uWidth", &uWidth, Uniform::FLOAT);
+	successState &= setUniform("uHeight", &uHeight, Uniform::FLOAT);
+	successState &= setUniform("uAspectRatio", &uAspectRatio, Uniform::FLOAT);
 
 	return successState;
 }
 
-void mainloop();
+bool setPerFrameUniforms() {
+	bool successState = true;
+	
+	successState &= setUniform("uCameraRotationMatrix", uCameraRotationMatrix, Uniform::MAT3);
+	successState &= setUniform("uFrame", &uFrame, Uniform::UINT);
+
+	return successState;
+}
+
+////////////
+// Camera //
+////////////
+
+float CameraRotation[3] = {0, 0, 0};
+bool calculateCamera() {
+	// For SOME reason GLSL uniform mat3s are stored in column-major order //
+	// Because of course, everyone just loves screwing with mathematicians //
+	float newCameraRotationMatrix[9] = {
+		cos( CameraRotation[1] ), -sin( CameraRotation[0] ) * sin( CameraRotation[1] ), -cos( CameraRotation[0] ) * sin( CameraRotation[1] ),
+		0.0                     ,  cos( CameraRotation[0] )                           , -sin( CameraRotation[0] )                           ,
+		sin( CameraRotation[1] ),  sin( CameraRotation[0] ) * cos( CameraRotation[1] ),  cos( CameraRotation[0] ) * cos( CameraRotation[1] ),
+	};
+	
+	for (int i = 0; i < 9; i++) uCameraRotationMatrix[i] = newCameraRotationMatrix[i];
+
+	return true;
+}
+
+////////////////////
+// Event Handlers //
+////////////////////
+
+bool recompileShaders() {
+	if (!compileShader(FragmentShader, "../Shaders/frag.glsl")) return false;
+	if (!compileShader(VertexShader, "../Shaders/vert.glsl")) return false;
+
+	// Finally, link and use the program //
+	if (!linkProgram()) return false;
+
+	// Set the necessary uniforms //
+	if (!setInitialUniforms()) return false;
+
+	print("Successfully recompiled shaders!!");
+	return true;
+}
+
+float Delta;
+float prevFrameTime = 0;
+std::unordered_map<int, bool> KeyStates;
+void handleKeypress(GLFWwindow* window, int key, int _, int action, int mods) {
+	KeyStates[key] = (action == GLFW_PRESS || action == GLFW_REPEAT);
+	if (action == GLFW_PRESS && key == GLFW_KEY_ESCAPE) ShouldExit = true;
+	if (action == GLFW_PRESS && key == GLFW_KEY_R) ShouldExit = !recompileShaders();
+	if (action == GLFW_PRESS && key == GLFW_KEY_P) PauseStatus = !PauseStatus;
+}
+
+bool handleMovement() {
+	if (KeyStates[GLFW_KEY_LEFT]) {
+		CameraRotation[1] += PI / 2 * Delta;
+	}
+	if (KeyStates[GLFW_KEY_RIGHT]) {
+		CameraRotation[1] -= PI / 2 * Delta;
+	}
+	if (KeyStates[GLFW_KEY_UP]) {
+		CameraRotation[0] -= PI / 2 * Delta;
+	}
+	if (KeyStates[GLFW_KEY_DOWN]) {
+		CameraRotation[0] += PI / 2 * Delta;
+	}
+	return true;
+}
+
+/////////////////////
+// Main & Mainloop //
+/////////////////////
+
+bool mainloop();
 int main() {
 	// Print Header :3 //
 	std::cout <<
@@ -246,7 +367,15 @@ int main() {
 	glfwInit();
 
 	// Create a window to display graphics on //
-	if (!createWindow()) { error("Could not create window."); return -1; }
+	if (!createWindow()) { return -1; }
+
+	// Tell GLFW to call our event handler when a key is pressed/released //
+	glfwSetKeyCallback(Window, handleKeypress);
+
+	// Initialize the KeyStates map with all false //
+	for (int i = 0; i < 348; i++) {
+		KeyStates[i] = false;
+	}
 
 	// Create a vertex buffer and populate it with a rectangle that covers the whole screen //
 	if (!createVertexBuffer()) { error("Could not create and populate vertex buffer."); return -1; }
@@ -255,14 +384,14 @@ int main() {
 	if (!createShaders()) { error("Could not create shaders."); return -1; }
 	
 	// Compile the shaders! //
-	if (!compileShader(FragmentShader, "../Shaders/frag.glsl")) { error("Could not compile fragment shader."); return -1; }
-	if (!compileShader(VertexShader, "../Shaders/vert.glsl")) { error("Could not compile vertex shader."); return -1; }
+	if (!compileShader(FragmentShader, "../Shaders/frag.glsl")) return -1;
+	if (!compileShader(VertexShader, "../Shaders/vert.glsl")) return -1;
 
 	// Finally, link and use the program //
-	if (!linkProgram()) { error("Could not link shader program."); return -1; }
+	if (!linkProgram()) return -1;
 
 	// Set the necessary uniforms //
-	if (!setUniforms()) { error("Could not set uniforms properly."); return -1; }
+	if (!setInitialUniforms()) return -1;
 
 	///////////////
 	// Main Loop //
@@ -273,7 +402,7 @@ int main() {
 
 	// Run mainloop until GLFW says we should stop //
 	print("Running simulation!");
-	while (!glfwWindowShouldClose(Window)) mainloop();
+	while (!ShouldExit) if (!mainloop()) return -1;
 
 	// Tell GLFW to clean up its mess :3c //
 	glfwTerminate();
@@ -282,7 +411,28 @@ int main() {
 	return 0;
 }
 
-void mainloop() {
+bool mainloop() {
+	if (PauseStatus) return true;
+
+	// Increment the frame counter //
+	uFrame++;
+
+	// Calculate Delta for framerate-independent movement //
+	Delta = glfwGetTime() - prevFrameTime;
+	prevFrameTime = glfwGetTime();
+
+	// Handle player movement //
+	handleMovement();
+	
+	// Bind the shaders //
+	glUseProgram(ShaderProgram);
+	
+	// Calculate the camera rotation matrix and pass it to the GPU //
+	if (!calculateCamera()) { error("Could not calculate rotation matrix for camera."); return false; }
+
+	// Pass all updated parameters to the GPU //
+	setPerFrameUniforms();
+
 	// Clear the screen //
 	glClear(GL_COLOR_BUFFER_BIT);
 
@@ -291,8 +441,11 @@ void mainloop() {
 
 	// Tell GLFW to actually show all our hard work //
 	glfwSwapBuffers(Window);
-
+	
 	// Make sure that key presses are handled //
 	// Also, without this line it crashes -w- //
 	glfwPollEvents();
+	if (glfwWindowShouldClose(Window)) ShouldExit = true;
+
+	return true;
 }
